@@ -1,0 +1,229 @@
+---
+header-includes: \usepackage{graphicx}
+output: html_document
+fontsize: 11pt
+graphics: yes
+---
+Predicting Quality of Workout Exercises from Accelerometer Data
+===========================
+#### _presented by_ Brad Mager
+
+## Summary
+
+An increasing number of people are using wearable devices to collect data about their personal activities, which includes exercises. However, while they typically quantify how much they perform an activity, they rarely measure how well they perform the exercise. In one study, six participants wore accelerometers and data was collected while they performed various exercises.
+
+The goal of this project is to predict the manner in which the subjects performed the exercise, on a scale indicated by the letters A -- E. Two machine learning classifiers were tried, with random forests performing the best with an out-of-sample error rate of less than 1%.
+
+Note that all the code used for generating this report can be found in the Appendix.
+
+## Pre-Processing the Data
+
+The data set includes 19,622 records with 159 predictors and one outcome vector. Cleaning up the data includes removing variables for which many of the values are NA or empty. Also, the first seven variables do not help in predicting the outcome, as they include things like the subject's name and the raw timestamp. Since we are mainly interseted in predicting quality of exercise based on accelerometer data, we can safely remove those variables. This leaves 52 predictors.
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+library(caret)
+library(ggplot2)
+library(class)
+library(randomForest)
+library(MASS)
+
+alldata <- read.csv("pml_training.csv", header=TRUE)
+pml_testing <- read.csv("pml_testing.csv", header=TRUE)
+```
+
+```{r, results='hide', message=FALSE, warning=FALSE, echo=FALSE}
+# Find the variables for which any of the values are NA or empty, since these should be ignored.
+nas <- apply(alldata, 2, function(x) sum(is.na(x) | as.character(x) == ""))
+alldata <- alldata[, which(nas == 0)]
+pml_testing <- pml_testing[,which(nas == 0)]
+# The first 7 columns also don't help in predicting the outcome, at least not in a fair way, so remove them
+alldata <- alldata[,-c(seq(1,7))]
+pml_testing <- pml_testing[,-c(seq(1,7))]
+```
+
+For cross validation purposes, the data is divided up into 70% training and 30% testing.
+
+```{r, results='hide', message=FALSE, warning=FALSE, echo=FALSE}
+# Divide the data into 70% training, and 30% testing sets.
+inTrain <- createDataPartition(y=alldata$classe, p=.7, list=FALSE)
+training <- droplevels(alldata[inTrain,])
+testing <- droplevels(alldata[-inTrain,])
+```
+
+## Model 1: K-Nearest Neighbors
+
+The first classifier to try is k-Nearest Neighbors (KNN), since this is a simple model and often successful with the kind of data provided. However, because KNN does not always perform well in a large feature space (i.e., when the number of predictors is too large), we can use principal components analysis first to reduce the number of predictors. The threshold value is set to 0.95, so that we are accounting for a large amount of variance.
+
+Next, a value for $k$ needs to be determined, which is done by looping through several values to see which one results in the lowest error. For cross-validation, each model derived from a specific k-value is then applied to the testing data. Figure 1 below shows that a value of $k=1$ should be used.
+
+```{r, results='hide', message=FALSE, warning=FALSE, echo=FALSE}
+# Pre-process the data with principal components analysis.
+preProc <- preProcess(training[,-53], method="pca", thresh=.95)
+trainPC <- predict(preProc, training[,-53])
+testPC <- predict(preProc, testing[,-53])
+
+kvals <- c(1,3,5,7,9)
+errs <- vector()
+j <- 0
+for (i in kvals) {
+    j <- j+1
+    fit_KNN <- knn(trainPC, testPC, training$classe, k=i)
+    errs[j] <- 1 - confusionMatrix(testing$classe, fit_KNN)$overall[1]
+    }
+df <- data.frame(K=kvals, Error=errs)
+```
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, fig.align="center", fig.height=4}
+ggplot(df) + geom_point(aes(x=K, y=Error), color='red', size=5) +
+    geom_line(aes(x=K, y=Error), color="red", lwd=1) +
+    scale_x_continuous(breaks=c(1,3,5,7,9)) +
+    ggtitle('Out-of-Sample Errors for KNN')
+```
+<center> **Fig. 1**---*Out-of-Sample Errors for K-Nearest Neighbors. A value of k = 1 results in the lowest error.* </center>
+<br/>
+<br/>
+
+It's instructive to look at the confusion matrix from the results of KNN using $k = 1$, to get a sense for how many responses were misclassified:
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+fit_KNN <- knn(trainPC, testPC, training$classe, k=1)
+confusionMatrix(testing$classe, fit_KNN)$table
+```
+This provides an out-of-sample error rate of $0.015$, which is encouraging, but perhaps we can do better.
+
+## Model 2: Random Forests
+
+The next classifier to try is Random Forests, which also often proves successful when we have data with many numerical predictors. The two parameters to choose are the number of trees to build and the number of predictors to randomly choose each time a tree is built. A common choice for number of predictors is the square root of the total predictors in the data, which is 52 in our case (after cleaning the data). The nearest whole number of $\sqrt{52}$ is $7$.
+
+As with KNN, we can loop through different values of the parameter to find the one with the lowest value. Here, we try different values for the number of trees, thn perform cross-validation by applying each model to the testing data and plot the resulting out-of-sample errors. Though the randomForests() function will provide the out-of-bag errors for all possible numbers of trees up to the value specified, we want to get the true out-of-sample errors by applying each model to the testing data.
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+ntreeVals <- c(50, 100, 200, 300, 400, 500, 600, 700, 800)
+RFerrs <- vector()
+j <- 0
+for (i in ntreeVals) {
+    j <- j+1
+    fit_rf <- randomForest(training[,-53], y=training$classe, ntree=i, mtry=7)
+    pred <- predict(fit_rf, testing[,-53])
+    RFerrs[j] <- 1 - confusionMatrix(pred, testing$classe)$overall[1]
+    }
+df <- data.frame(Trees=ntreeVals, Error=RFerrs)
+```
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, fig.align="center", fig.height=4}
+ggplot(df) + geom_point(aes(x=Trees, y=Error), color='red', size=5) +
+    geom_line(aes(x=Trees, y=Error), color="red", lwd=1) +
+    scale_x_continuous(breaks=c(50,100,200,300,400,500,600,700,800)) +
+    ggtitle('Out-of-Sample Errors for Random Forests')
+```
+<center> **Fig. 2**---*Out-of-Sample Errors for Random Forests. More trees generally results in lower error.* </center>
+<br/>
+<br/>
+
+As we might expect, the more trees we use for classification, the lower the error rate --- up to a point, where we no longer gain accuracy and can even see higher errors. Based on these results, a value of 500 is chosen for the number of trees to use. We can now look at the confusion matrix for this model, which results in an error rate of $0.0049$:
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+fit_rf <- randomForest(training[,-53], y=training$classe, ntree=500, mtry=7)
+pred <- predict(fit_rf, testing[,-53])
+confusionMatrix(testing$classe, pred)$table
+```
+
+## Conclusion
+
+Two machine learning classifiers were applied to the activity monitoring data of six participants in an attempt to predict how well they performed each exercise. Although k-Nearest Neighbors provided an error rate of just 1.5%, Random Forests did even better at 0.49%. This may be because Random Forests is more robust to the kind of noise we may experience in sensor data, such as that collected by monitoring devices.
+<br/>
+<br/>
+</hr>
+# Appendix --- R Programming Code
+
+Below is all the code used to process the data and present the results in this report.
+
+### Pre-Processing
+
+```{r, results='hide', message=FALSE, warning=FALSE, eval=FALSE}
+library(caret)
+library(ggplot2)
+library(class)
+library(randomForest)
+library(MASS)
+
+alldata <- read.csv("pml_training.csv", header=TRUE)
+pml_testing <- read.csv("pml_testing.csv", header=TRUE)
+```
+
+```{r, results='hide', message=FALSE, warning=FALSE, eval=FALSE}
+# Find the variables for which any of the values are NA or empty, since these should be ignored.
+nas <- apply(alldata, 2, function(x) sum(is.na(x) | as.character(x) == ""))
+alldata <- alldata[, which(nas == 0)]
+pml_testing <- pml_testing[,which(nas == 0)]
+# The first 7 columns also don't help in predicting the outcome, at least not in a fair way, so remove them
+alldata <- alldata[,-c(seq(1,7))]
+pml_testing <- pml_testing[,-c(seq(1,7))]
+```
+
+```{r, results='hide', message=FALSE, warning=FALSE, eval=FALSE}
+# Divide the data into 70% training, and 30% testing sets.
+inTrain <- createDataPartition(y=alldata$classe, p=.7, list=FALSE)
+training <- droplevels(alldata[inTrain,])
+testing <- droplevels(alldata[-inTrain,])
+```
+
+
+### K-Nearest Neighbors
+
+```{r, results='hide', message=FALSE, warning=FALSE, eval=FALSE}
+# Pre-process the data with principal components analysis.
+preProc <- preProcess(training[,-53], method="pca", thresh=.95)
+trainPC <- predict(preProc, training[,-53])
+testPC <- predict(preProc, testing[,-53])
+
+kvals <- c(1,3,5,7,9)
+errs <- vector()
+j <- 0
+for (i in kvals) {
+    j <- j+1
+    fit_KNN <- knn(trainPC, testPC, training$classe, k=i)
+    errs[j] <- 1 - confusionMatrix(testing$classe, fit_KNN)$overall[1]
+    }
+df <- data.frame(K=kvals, Error=errs)
+```
+
+```{r, results='hide', message=FALSE, warning=FALSE, fig.align="center", fig.height=4, eval=FALSE}
+ggplot(df) + geom_point(aes(x=K, y=Error), color='red', size=5) +
+    geom_line(aes(x=K, y=Error), color="red", lwd=1) +
+    scale_x_continuous(breaks=c(1,3,5,7,9)) +
+    ggtitle('Out-of-Sample Errors for KNN')
+```
+
+```{r, results='hide', message=FALSE, warning=FALSE, eval=FALSE}
+fit_KNN <- knn(trainPC, testPC, training$classe, k=1)
+confusionMatrix(testing$classe, fit_KNN)$table
+```
+
+### Random Forests
+
+```{r, results='hide', message=FALSE, warning=FALSE, eval=FALSE}
+ntreeVals <- c(50, 100, 200, 300, 400, 500, 600, 700, 800)
+RFerrs <- vector()
+j <- 0
+for (i in ntreeVals) {
+    j <- j+1
+    fit_rf <- randomForest(training[,-53], y=training$classe, ntree=i, mtry=7)
+    pred <- predict(fit_rf, testing[,-53])
+    RFerrs[j] <- 1 - confusionMatrix(pred, testing$classe)$overall[1]
+    }
+df <- data.frame(Trees=ntreeVals, Error=RFerrs)
+```
+
+```{r, results='hide', message=FALSE, warning=FALSE, eval=FALSE, fig.align="center", fig.height=4}
+ggplot(df) + geom_point(aes(x=Trees, y=Error), color='red', size=5) +
+    geom_line(aes(x=Trees, y=Error), color="red", lwd=1) +
+    scale_x_continuous(breaks=c(50,100,200,300,400,500,600,700,800)) +
+    ggtitle('Out-of-Sample Errors for Random Forests')
+```
+
+```{r, results='hide', message=FALSE, warning=FALSE, eval=FALSE, cache=TRUE}
+fit_rf <- randomForest(training[,-53], y=training$classe, ntree=500, mtry=7)
+pred <- predict(fit_rf, testing[,-53])
+confusionMatrix(testing$classe, pred)$table
+```
+
